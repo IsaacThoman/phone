@@ -27,12 +27,12 @@ constexpr uint32_t PARTIAL_REFRESH_FALLBACK_MS = 1000;
 constexpr uint32_t PHRASE_HOLD_MS = 2500;
 constexpr uint32_t CLEAR_HOLD_MS = 1500;
 
-constexpr int FONT_SCALE = 2;
+constexpr int FONT_SCALE = 1;
 constexpr int GLYPH_WIDTH = 5 * FONT_SCALE;
 constexpr int GLYPH_HEIGHT = 7 * FONT_SCALE;
 constexpr int CHAR_ADVANCE = GLYPH_WIDTH + 1;
 constexpr int LINE_ADVANCE = GLYPH_HEIGHT + 6;
-constexpr int TEXT_TOP = 70;
+constexpr int TEXT_TOP = 95;
 
 const char TYPING_TEXT[] =
     "the quick\n"

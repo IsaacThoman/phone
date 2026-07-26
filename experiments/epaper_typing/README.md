@@ -7,7 +7,8 @@ This Arduino sketch types:
 one character at a time on a vertically oriented Waveshare 2.13-inch V4
 e-paper display. Each visible typing step uses the panel's partial-refresh
 waveform. After the complete phrase has been shown, the sketch performs a full
-white refresh to remove ghosting and starts again.
+white refresh to remove ghosting and starts again. Text uses a 5 × 7 bitmap
+font at 1× scale.
 
 The sketch is self-contained and uses only the `SPI` library supplied by the
 ESP32 Arduino core. It uses the same wiring as the `epaper_pattern` experiment:
