@@ -7,3 +7,5 @@ board live under [`experiments/`](experiments/).
 
 - [`epaper_pattern`](experiments/epaper_pattern/) — draws a black-and-white
   calibration pattern on the Waveshare 2.13-inch V4 e-paper HAT.
+- [`epaper_typing`](experiments/epaper_typing/) — types the pangram in portrait
+  mode with partial refreshes, then clears it with a full refresh and repeats.
