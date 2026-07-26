@@ -26,6 +26,7 @@ constexpr uint32_t FULL_REFRESH_FALLBACK_MS = 5000;
 constexpr uint32_t PARTIAL_REFRESH_FALLBACK_MS = 1000;
 constexpr uint32_t PHRASE_HOLD_MS = 2500;
 constexpr uint32_t CLEAR_HOLD_MS = 1500;
+constexpr int CHARACTERS_PER_REFRESH = 2;
 
 constexpr int FONT_SCALE = 1;
 constexpr int GLYPH_WIDTH = 5 * FONT_SCALE;
@@ -300,7 +301,9 @@ bool typePhrase() {
   int previousCursorX = cursorX;
   int previousCursorY = cursorY;
   bool cursorVisible = false;
-  uint32_t visibleStep = 0;
+  uint32_t typedCharacters = 0;
+  uint32_t refreshStep = 0;
+  int charactersPending = 0;
 
   for (const char* character = TYPING_TEXT; *character != '\0'; ++character) {
     if (cursorVisible) {
@@ -322,17 +325,25 @@ bool typePhrase() {
     previousCursorY = cursorY;
     cursorVisible = true;
 
-    ++visibleStep;
-    Serial.printf("Typing '%c' (%lu)\n", *character, visibleStep);
-    if (!partialRefresh(visibleStep)) {
-      return false;
+    ++typedCharacters;
+    ++charactersPending;
+    Serial.printf("Typing '%c' (%lu)\n", *character, typedCharacters);
+    if (charactersPending >= CHARACTERS_PER_REFRESH) {
+      if (!partialRefresh(++refreshStep)) {
+        return false;
+      }
+      charactersPending = 0;
     }
+  }
+
+  if (charactersPending > 0 && !partialRefresh(++refreshStep)) {
+    return false;
   }
 
   delay(700);
   if (cursorVisible) {
     drawCursor(previousCursorX, previousCursorY, false);
-    if (!partialRefresh(++visibleStep)) {
+    if (!partialRefresh(++refreshStep)) {
       return false;
     }
   }
