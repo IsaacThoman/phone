@@ -1,3 +1,5 @@
+import mqtt from "mqtt";
+
 const ROOT = new URL(".", import.meta.url);
 const PUBLIC_DIR = new URL("./public/", ROOT);
 const DATA_DIR = new URL("./data/", ROOT);
@@ -20,6 +22,12 @@ const DISPLAY = {
 const DEFAULT_MESSAGE = "cellular link ready.";
 const MAX_MESSAGE_LENGTH = 300;
 const ALLOWED_MESSAGE = /^[\x20-\x7e\n]*$/;
+const MQTT_BROKER_URL = "mqtts://broker.hivemq.com:8883";
+const MQTT_NAMESPACE = "signal-note/cff796f9-d023-4fc0-beaf-4a9770018dcb";
+const MQTT_MESSAGE_TOPIC = `${MQTT_NAMESPACE}/phone-01/message`;
+const MQTT_STATUS_TOPIC = `${MQTT_NAMESPACE}/phone-01/status`;
+const MQTT_KEEP_ALIVE_SECONDS = 120;
+const HTTP_FALLBACK_SECONDS = 15 * 60;
 
 type MessageState = {
   message: string;
@@ -45,6 +53,48 @@ type DeviceStatus = {
 
 let state = await loadState();
 let deviceStatus = await loadDeviceStatus();
+let mqttConnected = false;
+let retainedMessageSeen = false;
+
+const mqttClient = mqtt.connect(MQTT_BROKER_URL, {
+  clean: true,
+  clientId: "signal-note-web-cff796f9",
+  connectTimeout: 15_000,
+  keepalive: MQTT_KEEP_ALIVE_SECONDS,
+  reconnectPeriod: 5_000,
+});
+
+mqttClient.on("connect", () => {
+  mqttConnected = true;
+  retainedMessageSeen = false;
+  console.log(`MQTT connected to ${MQTT_BROKER_URL}`);
+  mqttClient.subscribe(
+    [MQTT_MESSAGE_TOPIC, MQTT_STATUS_TOPIC],
+    { qos: 1 },
+    (error) => {
+      if (error) {
+        console.error("MQTT subscribe failed:", error);
+        return;
+      }
+      setTimeout(() => {
+        if (!retainedMessageSeen) void publishMessageState();
+      }, 1_500);
+    },
+  );
+});
+
+mqttClient.on("message", (topic, payload) => {
+  void handleMqttMessage(topic, payload.toString());
+});
+
+mqttClient.on("close", () => {
+  mqttConnected = false;
+});
+
+mqttClient.on("error", (error) => {
+  mqttConnected = false;
+  console.error("MQTT error:", error.message);
+});
 
 Deno.serve({ port: PORT }, async (request) => {
   try {
@@ -137,7 +187,11 @@ async function updateDeviceStatus(request: Request): Promise<Response> {
   const validationError = validateDeviceStatus(body);
   if (validationError) return json({ error: validationError }, 422);
 
-  const report = body as Omit<DeviceStatus, "reportedAt">;
+  await storeDeviceStatus(body as Omit<DeviceStatus, "reportedAt">);
+  return deviceStatusResponse();
+}
+
+async function storeDeviceStatus(report: Omit<DeviceStatus, "reportedAt">): Promise<void> {
   deviceStatus = {
     ...report,
     deviceId: cleanText(report.deviceId, 32),
@@ -149,7 +203,6 @@ async function updateDeviceStatus(request: Request): Promise<Response> {
     reportedAt: new Date().toISOString(),
   };
   await saveJson(DEVICE_STATUS_FILE, deviceStatus);
-  return deviceStatusResponse();
 }
 
 function validateDeviceStatus(value: unknown): string | undefined {
@@ -195,7 +248,12 @@ function messageResponse(request: Request): Response {
   }
 
   return json(
-    { ...state, pollAfterSeconds: 30, display: DISPLAY },
+    {
+      ...state,
+      delivery: deliveryState(),
+      httpFallbackAfterSeconds: HTTP_FALLBACK_SECONDS,
+      display: DISPLAY,
+    },
     200,
     { etag, "cache-control": "no-cache" },
   );
@@ -221,7 +279,10 @@ async function updateMessage(request: Request): Promise<Response> {
   const validationError = validateMessage(message);
   if (validationError) return json({ error: validationError }, 422);
 
-  if (message === state.message) return messageResponse(request);
+  if (message === state.message) {
+    await publishMessageState();
+    return messageResponse(request);
+  }
 
   state = {
     message,
@@ -229,7 +290,82 @@ async function updateMessage(request: Request): Promise<Response> {
     updatedAt: new Date().toISOString(),
   };
   await saveState(state);
-  return json({ ...state, pollAfterSeconds: 30, display: DISPLAY });
+  const published = await publishMessageState();
+  return json({
+    ...state,
+    delivery: { ...deliveryState(), published },
+    httpFallbackAfterSeconds: HTTP_FALLBACK_SECONDS,
+    display: DISPLAY,
+  });
+}
+
+function deliveryState() {
+  return {
+    primary: "mqtt",
+    connected: mqttConnected,
+    keepAliveSeconds: MQTT_KEEP_ALIVE_SECONDS,
+  };
+}
+
+async function publishMessageState(): Promise<boolean> {
+  if (!mqttConnected) return false;
+
+  return await new Promise<boolean>((resolve) => {
+    mqttClient.publish(
+      MQTT_MESSAGE_TOPIC,
+      JSON.stringify(state),
+      { qos: 1, retain: true },
+      (error) => {
+        if (error) console.error("MQTT message publish failed:", error);
+        resolve(!error);
+      },
+    );
+  });
+}
+
+async function handleMqttMessage(topic: string, payload: string): Promise<void> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(payload);
+  } catch {
+    console.error(`Ignored invalid JSON from MQTT topic ${topic}`);
+    return;
+  }
+
+  if (topic === MQTT_MESSAGE_TOPIC) {
+    retainedMessageSeen = true;
+    if (!isMessageState(parsed)) {
+      console.error("Ignored invalid retained MQTT message");
+      return;
+    }
+    if (parsed.revision >= state.revision) {
+      if (parsed.message !== state.message || parsed.revision !== state.revision) {
+        state = parsed;
+        await saveState(state);
+      }
+    } else {
+      await publishMessageState();
+    }
+    return;
+  }
+
+  if (topic === MQTT_STATUS_TOPIC) {
+    const validationError = validateDeviceStatus(parsed);
+    if (validationError) {
+      console.error(`Ignored invalid MQTT telemetry: ${validationError}`);
+      return;
+    }
+    await storeDeviceStatus(parsed as Omit<DeviceStatus, "reportedAt">);
+  }
+}
+
+function isMessageState(value: unknown): value is MessageState {
+  return isRecord(value) &&
+    typeof value.message === "string" &&
+    Number.isInteger(value.revision) &&
+    (value.revision as number) > 0 &&
+    typeof value.updatedAt === "string" &&
+    !validateMessage(value.message);
 }
 
 function validateMessage(message: string): string | undefined {

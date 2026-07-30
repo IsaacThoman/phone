@@ -1,15 +1,21 @@
 # Cellular message phone
 
 Firmware for the Waveshare ESP32-S3-SIM7670G-4G and 2.13-inch V4 e-paper
-display. Every 30 seconds it:
+display. It:
 
-1. fetches `GET /api/message` over the SIM7670G cellular connection;
+1. maintains an MQTT/TLS subscription with a 120-second keepalive and receives
+   message changes immediately;
 2. refreshes the e-paper panel only when the message revision changes; and
-3. posts non-sensitive connection telemetry to `POST /api/device/status`.
+3. publishes non-sensitive connection telemetry over MQTT every 30 seconds.
+
+Every 15 minutes, the firmware temporarily reconnects through HTTPS to fetch the
+latest message and report telemetry as a fallback, then restores MQTT.
 
 The firmware does not send IMEI, ICCID, IMSI, phone number, or location. HTTPS
-traffic is encrypted, but this prototype disables server-certificate
-verification because no CA bundle is installed in the modem.
+MQTT and HTTPS traffic is encrypted, but this prototype disables
+server-certificate verification because no CA bundle is installed in the modem.
+The MQTT transport currently uses HiveMQ's unauthenticated public test broker;
+use a private authenticated broker for production.
 
 The modem is configured at boot for the Hologram SIM:
 

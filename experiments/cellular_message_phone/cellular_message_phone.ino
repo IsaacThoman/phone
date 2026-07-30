@@ -1,9 +1,9 @@
 /*
   Cellular message phone
 
-  Polls the Signal Note service over the onboard SIM7670G every 30 seconds,
-  renders changed messages on a Waveshare 2.13-inch V4 e-paper HAT, and reports
-  non-sensitive connection telemetry to the web dashboard.
+  Receives Signal Note messages immediately over MQTT/TLS through the onboard
+  SIM7670G, renders changed messages on a Waveshare 2.13-inch V4 e-paper HAT,
+  and reports non-sensitive connection telemetry to the web dashboard.
 */
 
 #include <Arduino.h>
@@ -13,9 +13,18 @@
 
 constexpr char BASE_URL[] = "https://phone-msg-testserver.deathgrips.org";
 constexpr char CELLULAR_APN[] = "hologram";
-constexpr char FIRMWARE_VERSION[] = "1.0.0";
+constexpr char FIRMWARE_VERSION[] = "1.1.0";
 constexpr char DEVICE_ID[] = "phone-01";
-constexpr uint32_t POLL_INTERVAL_MS = 30000;
+constexpr char MQTT_HOST[] = "broker.hivemq.com";
+constexpr int MQTT_PORT = 8883;
+constexpr char MQTT_MESSAGE_TOPIC[] =
+    "signal-note/cff796f9-d023-4fc0-beaf-4a9770018dcb/phone-01/message";
+constexpr char MQTT_STATUS_TOPIC[] =
+    "signal-note/cff796f9-d023-4fc0-beaf-4a9770018dcb/phone-01/status";
+constexpr int MQTT_KEEP_ALIVE_SECONDS = 120;
+constexpr uint32_t TELEMETRY_INTERVAL_MS = 30000;
+constexpr uint32_t MQTT_RECONNECT_INTERVAL_MS = 10000;
+constexpr uint32_t HTTP_FALLBACK_INTERVAL_MS = 15 * 60 * 1000;
 
 constexpr int MODEM_RX = 17;
 constexpr int MODEM_TX = 18;
@@ -48,8 +57,14 @@ constexpr uint32_t EPD_BUSY_TIMEOUT_MS = 20000;
 HardwareSerial SerialAT(1);
 uint8_t frameBuffer[FRAME_BYTES];
 int lastMessageRevision = 0;
-uint32_t nextPollAt = 0;
+String lastDisplayedMessage;
+uint32_t nextHttpFallbackAt = 0;
+uint32_t nextTelemetryAt = 0;
+uint32_t nextMqttReconnectAt = 0;
 String lastLocalStatus;
+String mqttReceiveBuffer;
+bool mqttConnected = false;
+bool pendingDisplayUpdated = false;
 
 struct ConnectionStatus {
   int rssiDbm = 0;
@@ -61,8 +76,12 @@ struct ConnectionStatus {
 };
 
 void drainModem() {
+  String drained;
   while (SerialAT.available()) {
-    SerialAT.read();
+    drained += static_cast<char>(SerialAT.read());
+  }
+  if (mqttConnected && !drained.isEmpty()) {
+    mqttReceiveBuffer += drained;
   }
 }
 
@@ -92,7 +111,15 @@ bool sendAT(const String& command, const String& expected, uint32_t timeoutMs,
   SerialAT.print(command);
   SerialAT.print("\r");
   const bool found = readUntil(expected, timeoutMs, response);
+  if (found && expected.startsWith("+CMQTT")) {
+    String resultTail;
+    readUntil("\r\n", 1000, resultTail);
+    response += resultTail;
+  }
   Serial.printf("MODEM < %s\n", response.c_str());
+  if (mqttConnected && response.indexOf("+CMQTT") >= 0) {
+    mqttReceiveBuffer += response;
+  }
   return found && response.indexOf("\r\nERROR\r\n") < 0;
 }
 
@@ -281,26 +308,7 @@ bool readHttpBody(int bodyLength, String& body) {
   return true;
 }
 
-bool getMessage(String& message, int& revision) {
-  if (!setHttpUrl("/api/message") ||
-      !sendAT("AT+HTTPPARA=\"ACCEPT\",\"application/json\"")) {
-    return false;
-  }
-
-  int statusCode = 0;
-  int bodyLength = 0;
-  if (!performHttpAction(0, statusCode, bodyLength) || statusCode != 200 ||
-      bodyLength <= 0) {
-    Serial.printf("Message GET failed: HTTP %d, length %d\n", statusCode,
-                  bodyLength);
-    return false;
-  }
-
-  String body;
-  if (!readHttpBody(bodyLength, body)) {
-    return false;
-  }
-
+bool parseMessageJson(const String& body, String& message, int& revision) {
   const String messageKey = "\"message\":\"";
   int position = body.indexOf(messageKey);
   if (position < 0) {
@@ -340,6 +348,26 @@ bool getMessage(String& message, int& revision) {
   return revision > 0;
 }
 
+bool getMessage(String& message, int& revision) {
+  if (!setHttpUrl("/api/message") ||
+      !sendAT("AT+HTTPPARA=\"ACCEPT\",\"application/json\"")) {
+    return false;
+  }
+
+  int statusCode = 0;
+  int bodyLength = 0;
+  if (!performHttpAction(0, statusCode, bodyLength) || statusCode != 200 ||
+      bodyLength <= 0) {
+    Serial.printf("Message GET failed: HTTP %d, length %d\n", statusCode,
+                  bodyLength);
+    return false;
+  }
+
+  String body;
+  return readHttpBody(bodyLength, body) &&
+         parseMessageJson(body, message, revision);
+}
+
 String jsonEscape(String value) {
   value.replace("\\", "\\\\");
   value.replace("\"", "\\\"");
@@ -348,8 +376,8 @@ String jsonEscape(String value) {
   return value;
 }
 
-bool postTelemetry(const ConnectionStatus& connection, bool pollOk,
-                   bool displayUpdated, const String& lastError) {
+String telemetryJson(const ConnectionStatus& connection, bool pollOk,
+                     bool displayUpdated, const String& lastError) {
   String body = "{\"deviceId\":\"" + String(DEVICE_ID) + "\"";
   body += ",\"firmwareVersion\":\"" + String(FIRMWARE_VERSION) + "\"";
   body += ",\"uptimeSeconds\":" + String(millis() / 1000);
@@ -364,7 +392,13 @@ bool postTelemetry(const ConnectionStatus& connection, bool pollOk,
   body += ",\"displayUpdated\":" + String(displayUpdated ? "true" : "false");
   body += ",\"lastPollOk\":" + String(pollOk ? "true" : "false");
   body += ",\"lastError\":\"" + jsonEscape(lastError) + "\"}";
+  return body;
+}
 
+bool postTelemetry(const ConnectionStatus& connection, bool pollOk,
+                   bool displayUpdated, const String& lastError) {
+  const String body =
+      telemetryJson(connection, pollOk, displayUpdated, lastError);
   if (!setHttpUrl("/api/device/status") ||
       !sendAT("AT+HTTPPARA=\"CONTENT\",\"application/json\"")) {
     return false;
@@ -386,6 +420,121 @@ bool postTelemetry(const ConnectionStatus& connection, bool pollOk,
   const bool actionOk = performHttpAction(1, statusCode, bodyLength);
   Serial.printf("Telemetry POST: HTTP %d\n", statusCode);
   return actionOk && statusCode >= 200 && statusCode < 300;
+}
+
+bool mqttResultIsZero(const String& response, const String& prefix) {
+  const int start = response.indexOf(prefix);
+  if (start < 0) {
+    return false;
+  }
+  int end = response.indexOf('\r', start);
+  if (end < 0) {
+    end = response.length();
+  }
+  String result = response.substring(start + prefix.length(), end);
+  result.replace(" ", "");
+  return result == "0,0" || result == "0";
+}
+
+bool sendMqttInput(const String& command, const String& value,
+                   const String& resultPrefix, uint32_t timeoutMs = 30000) {
+  String response;
+  if (!sendAT(command, ">", 10000, response)) {
+    return false;
+  }
+  Serial.printf("MODEM DATA > %s\n", value.c_str());
+  SerialAT.print(value);
+  response = "";
+  if (!readUntil(resultPrefix, timeoutMs, response)) {
+    Serial.printf("MODEM < %s\n", response.c_str());
+    return false;
+  }
+  String tail;
+  readUntil("\r\n", 1000, tail);
+  response += tail;
+  Serial.printf("MODEM < %s\n", response.c_str());
+  if (mqttConnected && response.indexOf("+CMQTTRXSTART:") >= 0) {
+    mqttReceiveBuffer += response;
+  }
+  if (resultPrefix == "\r\nOK\r\n") {
+    return response.indexOf(resultPrefix) >= 0;
+  }
+  return mqttResultIsZero(response, resultPrefix);
+}
+
+void stopMqtt() {
+  mqttConnected = false;
+  String response;
+  sendAT("AT+CMQTTDISC=0,120", "+CMQTTDISC:", 15000, response);
+  sendAT("AT+CMQTTREL=0", "\r\nOK\r\n", 5000);
+  sendAT("AT+CMQTTSTOP", "+CMQTTSTOP:", 15000, response);
+}
+
+bool subscribeMqtt() {
+  const String topic = MQTT_MESSAGE_TOPIC;
+  return sendMqttInput(
+      "AT+CMQTTSUB=0," + String(topic.length()) + ",1", topic,
+      "+CMQTTSUB:", 30000);
+}
+
+bool connectMqtt() {
+  Serial.println("\n--- MQTT connect ---");
+  stopMqtt();
+  mqttReceiveBuffer = "";
+
+  if (!sendAT("AT+CSSLCFG=\"sslversion\",0,4", "\r\nOK\r\n", 10000) ||
+      !sendAT("AT+CSSLCFG=\"authmode\",0,0", "\r\nOK\r\n", 10000) ||
+      !sendAT("AT+CSSLCFG=\"enableSNI\",0,1", "\r\nOK\r\n", 10000)) {
+    return false;
+  }
+
+  String response;
+  if (!sendAT("AT+CMQTTSTART", "+CMQTTSTART:", 15000, response) ||
+      !mqttResultIsZero(response, "+CMQTTSTART:") ||
+      !sendAT("AT+CMQTTACCQ=0,\"signal-note-phone-01\",1") ||
+      !sendAT("AT+CMQTTSSLCFG=0,0")) {
+    stopMqtt();
+    return false;
+  }
+
+  const String server = "tcp://" + String(MQTT_HOST) + ":" +
+                        String(MQTT_PORT);
+  if (!sendAT("AT+CMQTTCONNECT=0,\"" + server + "\"," +
+                  String(MQTT_KEEP_ALIVE_SECONDS) + ",1",
+              "+CMQTTCONNECT:", HTTP_TIMEOUT_MS, response) ||
+      !mqttResultIsZero(response, "+CMQTTCONNECT:")) {
+    stopMqtt();
+    return false;
+  }
+
+  mqttConnected = true;
+  if (!subscribeMqtt()) {
+    stopMqtt();
+    return false;
+  }
+
+  Serial.printf("MQTT subscribed: %s\n", MQTT_MESSAGE_TOPIC);
+  return true;
+}
+
+bool publishMqtt(const String& topic, const String& payload, bool retained) {
+  if (!mqttConnected ||
+      !sendMqttInput("AT+CMQTTTOPIC=0," + String(topic.length()), topic,
+                     "\r\nOK\r\n") ||
+      !sendMqttInput("AT+CMQTTPAYLOAD=0," + String(payload.length()), payload,
+                     "\r\nOK\r\n")) {
+    mqttConnected = false;
+    return false;
+  }
+
+  String response;
+  if (!sendAT("AT+CMQTTPUB=0,1,60," + String(retained ? 1 : 0),
+              "+CMQTTPUB:", 70000, response) ||
+      !mqttResultIsZero(response, "+CMQTTPUB:")) {
+    mqttConnected = false;
+    return false;
+  }
+  return true;
 }
 
 void transferByte(uint8_t value) {
@@ -580,8 +729,121 @@ void showLocalStatus(const String& message) {
   }
 }
 
-void pollOnce() {
-  Serial.println("\n--- cellular poll ---");
+bool applyMessage(const String& message, int revision) {
+  if (revision < lastMessageRevision) {
+    Serial.printf("Ignored stale message revision %d (display has %d).\n",
+                  revision, lastMessageRevision);
+    return true;
+  }
+  if (revision == lastMessageRevision && message == lastDisplayedMessage &&
+      lastLocalStatus.isEmpty()) {
+    return true;
+  }
+  if (!refreshDisplay(message)) {
+    return false;
+  }
+  lastMessageRevision = revision;
+  lastDisplayedMessage = message;
+  lastLocalStatus = "";
+  pendingDisplayUpdated = true;
+  return true;
+}
+
+void readMqttSerial() {
+  while (SerialAT.available()) {
+    mqttReceiveBuffer += static_cast<char>(SerialAT.read());
+  }
+  if (mqttReceiveBuffer.length() > 16384) {
+    mqttReceiveBuffer.remove(0, mqttReceiveBuffer.length() - 16384);
+  }
+}
+
+String mqttBlockValue(const String& block, const String& marker) {
+  const int markerStart = block.indexOf(marker);
+  if (markerStart < 0) {
+    return "";
+  }
+  const int lengthStart = block.indexOf(',', markerStart) + 1;
+  const int contentStart = block.indexOf('\n', lengthStart) + 1;
+  if (lengthStart <= 0 || contentStart <= 0) {
+    return "";
+  }
+  const int contentLength =
+      block.substring(lengthStart, contentStart).toInt();
+  if (contentLength < 0 ||
+      contentStart + contentLength > static_cast<int>(block.length())) {
+    return "";
+  }
+  return block.substring(contentStart, contentStart + contentLength);
+}
+
+void processMqttInput() {
+  if (mqttReceiveBuffer.indexOf("+CMQTTCONNLOST:") >= 0 ||
+      mqttReceiveBuffer.indexOf("+CMQTTNONET") >= 0) {
+    Serial.println("MQTT connection lost.");
+    mqttConnected = false;
+    mqttReceiveBuffer = "";
+    return;
+  }
+
+  while (true) {
+    const int start = mqttReceiveBuffer.indexOf("+CMQTTRXSTART:");
+    if (start < 0) {
+      if (mqttReceiveBuffer.length() > 256) {
+        mqttReceiveBuffer.remove(0, mqttReceiveBuffer.length() - 256);
+      }
+      return;
+    }
+    const int end = mqttReceiveBuffer.indexOf("+CMQTTRXEND:", start);
+    if (end < 0) {
+      if (start > 0) {
+        mqttReceiveBuffer.remove(0, start);
+      }
+      return;
+    }
+    int blockEnd = mqttReceiveBuffer.indexOf('\n', end);
+    if (blockEnd < 0) {
+      return;
+    }
+    ++blockEnd;
+    const String block = mqttReceiveBuffer.substring(start, blockEnd);
+    mqttReceiveBuffer.remove(0, blockEnd);
+
+    const String topic = mqttBlockValue(block, "+CMQTTRXTOPIC:");
+    const String payload = mqttBlockValue(block, "+CMQTTRXPAYLOAD:");
+    Serial.printf("MQTT RX topic=%s payload=%s\n", topic.c_str(),
+                  payload.c_str());
+    if (topic != MQTT_MESSAGE_TOPIC) {
+      continue;
+    }
+
+    String message;
+    int revision = 0;
+    if (!parseMessageJson(payload, message, revision)) {
+      Serial.println("Ignored invalid MQTT message.");
+      continue;
+    }
+    if (!applyMessage(message, revision)) {
+      showLocalStatus("message received\ndisplay refresh failed");
+    }
+  }
+}
+
+void reportMqttTelemetry() {
+  const ConnectionStatus connection = readConnectionStatus();
+  const String error = mqttConnected ? "" : "MQTT disconnected";
+  const String body =
+      telemetryJson(connection, mqttConnected, pendingDisplayUpdated, error);
+  if (publishMqtt(MQTT_STATUS_TOPIC, body, false)) {
+    pendingDisplayUpdated = false;
+    Serial.println("MQTT telemetry published.");
+  } else {
+    Serial.println("MQTT telemetry publish failed.");
+  }
+}
+
+void httpFallbackOnce() {
+  Serial.println("\n--- 15-minute HTTP fallback ---");
   String message;
   int revision = 0;
   bool pollOk = false;
@@ -595,11 +857,8 @@ void pollOnce() {
   } else {
     pollOk = true;
     if (revision != lastMessageRevision || !lastLocalStatus.isEmpty()) {
-      if (refreshDisplay(message)) {
-        lastMessageRevision = revision;
-        lastLocalStatus = "";
-        displayUpdated = true;
-      } else {
+      displayUpdated = applyMessage(message, revision);
+      if (!displayUpdated) {
         pollOk = false;
         lastError = "e-paper refresh timed out";
       }
@@ -618,6 +877,8 @@ void pollOnce() {
   }
   if (!postTelemetry(connection, pollOk, displayUpdated, lastError)) {
     Serial.println("Telemetry report failed.");
+  } else if (displayUpdated) {
+    pendingDisplayUpdated = false;
   }
   sendAT("AT+HTTPTERM");
 }
@@ -651,14 +912,42 @@ void setup() {
   } else {
     showLocalStatus("cellular connected\ncontacting server...");
   }
-  pollOnce();
-  nextPollAt = millis() + POLL_INTERVAL_MS;
+  httpFallbackOnce();
+  if (!connectMqtt()) {
+    showLocalStatus("cellular online\nmqtt reconnecting...");
+  }
+  nextTelemetryAt = millis() + TELEMETRY_INTERVAL_MS;
+  nextMqttReconnectAt = millis() + MQTT_RECONNECT_INTERVAL_MS;
+  nextHttpFallbackAt = millis() + HTTP_FALLBACK_INTERVAL_MS;
 }
 
 void loop() {
-  if (static_cast<int32_t>(millis() - nextPollAt) >= 0) {
-    pollOnce();
-    nextPollAt = millis() + POLL_INTERVAL_MS;
+  readMqttSerial();
+  processMqttInput();
+
+  const uint32_t now = millis();
+  if (!mqttConnected &&
+      static_cast<int32_t>(now - nextMqttReconnectAt) >= 0) {
+    if (!connectMqtt()) {
+      showLocalStatus("cellular online\nmqtt reconnecting...");
+    }
+    nextMqttReconnectAt = millis() + MQTT_RECONNECT_INTERVAL_MS;
+  }
+
+  if (mqttConnected &&
+      static_cast<int32_t>(now - nextTelemetryAt) >= 0) {
+    reportMqttTelemetry();
+    nextTelemetryAt = millis() + TELEMETRY_INTERVAL_MS;
+  }
+
+  if (static_cast<int32_t>(now - nextHttpFallbackAt) >= 0) {
+    stopMqtt();
+    httpFallbackOnce();
+    if (!connectMqtt()) {
+      showLocalStatus("cellular online\nmqtt reconnecting...");
+    }
+    nextHttpFallbackAt = millis() + HTTP_FALLBACK_INTERVAL_MS;
+    nextTelemetryAt = millis() + TELEMETRY_INTERVAL_MS;
   }
   delay(20);
 }

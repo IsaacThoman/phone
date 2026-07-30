@@ -1,8 +1,11 @@
 {
   "tasks": {
-    "dev": "deno run --watch=server.ts,public/ --allow-net --allow-read --allow-write=data --allow-env=PORT server.ts",
-    "start": "deno run --allow-net --allow-read --allow-write=data --allow-env=PORT server.ts",
+    "dev": "deno run --watch=server.ts,public/ --allow-net --allow-read --allow-write=data --allow-env server.ts",
+    "start": "deno run --allow-net --allow-read --allow-write=data --allow-env server.ts",
     "check": "deno check server.ts public/app.js && deno fmt --check && deno lint"
+  },
+  "imports": {
+    "mqtt": "npm:mqtt@5.14.1"
   },
   "fmt": {
     "lineWidth": 100,

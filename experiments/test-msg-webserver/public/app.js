@@ -270,7 +270,9 @@ form.addEventListener("submit", async (event) => {
     input.value = data.message;
     revision.textContent = `REV ${data.revision}`;
     updatePreview();
-    status.textContent = "Message set. The device will receive it on its next poll.";
+    status.textContent = data.delivery?.published
+      ? "Message sent to the device over MQTT."
+      : "Message saved. MQTT is reconnecting; the 15-minute HTTP fallback remains active.";
   } catch (error) {
     status.textContent = `Could not set message: ${error.message}`;
   } finally {

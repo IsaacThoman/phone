@@ -1,9 +1,11 @@
 FROM denoland/deno:alpine-2.9.3
 
 WORKDIR /app
-COPY deno.json server.ts ./
+COPY deno.json deno.lock server.ts ./
 COPY public ./public
-RUN mkdir -p /app/data && chown -R deno:deno /app
+RUN deno cache --frozen server.ts && \
+  mkdir -p /app/data && \
+  chown -R deno:deno /app
 
 USER deno
 ENV PORT=8000

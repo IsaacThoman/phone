@@ -1,8 +1,12 @@
 # Cellular message web server
 
-A dependency-free Deno service for setting the message shown on the project's Waveshare 2.13-inch V4
-e-paper display. The web preview renders the actual 122 × 250 one-bit framebuffer using the shared
+A Deno service for setting the message shown on the project's Waveshare 2.13-inch V4 e-paper
+display. The web preview renders the actual 122 × 250 one-bit framebuffer using the shared
 `phone-5x7-v1` bitmap font, word-wrapping, and centering contract.
+
+Message delivery and telemetry use retained MQTT over TLS through the public HiveMQ test broker. The
+device keeps its MQTT session alive for 120 seconds and falls back to the HTTPS API every 15
+minutes.
 
 ## Run locally
 
@@ -13,16 +17,25 @@ deno task dev
 
 Open <http://localhost:8000>. Set `PORT` to listen on a different port.
 
-## HTTP API
+## Message delivery
 
-The ESP32 should make a `GET /api/message` request every 30 seconds:
+The browser updates `PUT /api/message`. The server saves the message and publishes the complete
+message state as a retained QoS 1 MQTT message. The device subscribes to it and normally receives
+updates immediately.
+
+`GET /api/message` remains the device's 15-minute fallback:
 
 ```json
 {
   "message": "cellular link ready.",
   "revision": 1,
   "updatedAt": "1970-01-01T00:00:00.000Z",
-  "pollAfterSeconds": 30,
+  "delivery": {
+    "primary": "mqtt",
+    "connected": true,
+    "keepAliveSeconds": 120
+  },
+  "httpFallbackAfterSeconds": 900,
   "display": {
     "width": 122,
     "height": 250,
@@ -55,7 +68,8 @@ same rendering rules.
 
 ## Device telemetry
 
-The phone reports its non-sensitive connection state after each message poll:
+The phone normally publishes its non-sensitive connection state over MQTT every 30 seconds. The HTTP
+endpoint remains available to the fallback path and for diagnostics:
 
 ```sh
 curl -X POST http://localhost:8000/api/device/status \
@@ -78,6 +92,11 @@ curl -X POST http://localhost:8000/api/device/status \
 
 `GET /api/device/status` returns the latest report with server-calculated presence and age. The
 server deliberately does not collect IMEI, ICCID, IMSI, phone number, or location.
+
+The broker namespace contains a random project identifier to prevent accidental topic collisions.
+The public test broker does not provide authentication or delivery guarantees suitable for
+production; move the same topics to an authenticated private broker before using this beyond the
+prototype.
 
 ## Deploy behind HTTPS
 
