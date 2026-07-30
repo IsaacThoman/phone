@@ -98,7 +98,11 @@ async function route(request: Request): Promise<Response> {
   const file = await Deno.readFile(new URL(fileName, PUBLIC_DIR));
   const headers = new Headers({
     "content-type": contentType(fileName),
-    "cache-control": fileName === "index.html" ? "no-cache" : "public, max-age=3600",
+    // These assets use stable filenames, so browsers and the reverse proxy must
+    // re-fetch them after each deploy instead of mixing old JS with new HTML.
+    "cache-control": "no-store, no-cache, must-revalidate, max-age=0",
+    "cdn-cache-control": "no-store",
+    "cloudflare-cdn-cache-control": "no-store",
     "x-content-type-options": "nosniff",
   });
   return new Response(request.method === "HEAD" ? null : file, { headers });

@@ -49,6 +49,7 @@ HardwareSerial SerialAT(1);
 uint8_t frameBuffer[FRAME_BYTES];
 int lastMessageRevision = 0;
 uint32_t nextPollAt = 0;
+String lastLocalStatus;
 
 struct ConnectionStatus {
   int rssiDbm = 0;
@@ -224,6 +225,11 @@ bool beginHttp() {
   // Certificate verification is disabled for this prototype because the modem
   // has no CA bundle installed. The transport is still encrypted.
   if (!sendAT("AT+CSSLCFG=\"authmode\",0,0", "\r\nOK\r\n", 10000)) {
+    return false;
+  }
+  // The reverse proxy hosts multiple HTTPS domains on one address, so the
+  // modem must send the requested hostname during the TLS handshake.
+  if (!sendAT("AT+CSSLCFG=\"enableSNI\",0,1", "\r\nOK\r\n", 10000)) {
     return false;
   }
   if (!sendAT("AT+HTTPINIT", "\r\nOK\r\n", HTTP_TIMEOUT_MS)) {
@@ -562,6 +568,18 @@ bool refreshDisplay(const String& message) {
   return waitUntilIdle();
 }
 
+void showLocalStatus(const String& message) {
+  if (message == lastLocalStatus) {
+    return;
+  }
+  Serial.printf("DISPLAY STATUS: %s\n", message.c_str());
+  if (refreshDisplay(message)) {
+    lastLocalStatus = message;
+  } else {
+    Serial.println("WARNING: could not draw connection status.");
+  }
+}
+
 void pollOnce() {
   Serial.println("\n--- cellular poll ---");
   String message;
@@ -576,9 +594,10 @@ void pollOnce() {
     lastError = "message request failed";
   } else {
     pollOk = true;
-    if (revision != lastMessageRevision) {
+    if (revision != lastMessageRevision || !lastLocalStatus.isEmpty()) {
       if (refreshDisplay(message)) {
         lastMessageRevision = revision;
+        lastLocalStatus = "";
         displayUpdated = true;
       } else {
         pollOk = false;
@@ -588,6 +607,15 @@ void pollOnce() {
   }
 
   const ConnectionStatus connection = readConnectionStatus();
+  if (!pollOk) {
+    if (connection.networkType == "NO SERVICE" ||
+        connection.networkType.isEmpty()) {
+      showLocalStatus(
+          "cellular\nno service\nhologram activating\nretrying...");
+    } else {
+      showLocalStatus("cellular online\nserver unavailable\nretrying...");
+    }
+  }
   if (!postTelemetry(connection, pollOk, displayUpdated, lastError)) {
     Serial.println("Telemetry report failed.");
   }
@@ -605,10 +633,12 @@ void setup() {
   pinMode(EPD_BUSY, INPUT);
   digitalWrite(EPD_CS, HIGH);
   SPI.begin(EPD_SCLK, -1, EPD_MOSI, EPD_CS);
+  showLocalStatus("cellular\nstarting...");
 
   SerialAT.begin(MODEM_BAUD, SERIAL_8N1, MODEM_RX, MODEM_TX);
   if (!waitForModem()) {
     Serial.println("FATAL: SIM7670G did not respond.");
+    showLocalStatus("cellular\nmodem not found\ncheck device");
     return;
   }
   if (!configureCellular()) {
@@ -616,6 +646,10 @@ void setup() {
   }
   if (!waitForNetwork()) {
     Serial.println("WARNING: cellular registration timed out; polling anyway.");
+    showLocalStatus(
+        "cellular\nno service\nhologram activating\nretrying...");
+  } else {
+    showLocalStatus("cellular connected\ncontacting server...");
   }
   pollOnce();
   nextPollAt = millis() + POLL_INTERVAL_MS;
