@@ -9,3 +9,5 @@ board live under [`experiments/`](experiments/).
   calibration pattern on the Waveshare 2.13-inch V4 e-paper HAT.
 - [`epaper_typing`](experiments/epaper_typing/) — types the pangram in portrait
   mode with partial refreshes, then clears it with a full refresh and repeats.
+- [`test-msg-webserver`](experiments/test-msg-webserver/) — runs a Deno web app
+  and polling API for setting the e-paper message over cellular.

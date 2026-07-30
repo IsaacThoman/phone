@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#d8ff3e">
+    <meta
+      name="description"
+      content="Set the message shown on the Phone project's cellular e-paper display."
+    >
+    <title>Signal Note</title>
+    <link rel="stylesheet" href="/styles.css">
+    <script type="module" src="/app.js"></script>
+  </head>
+  <body>
+    <main>
+      <header class="masthead">
+        <a class="brand" href="/" aria-label="Signal Note home">
+          <span class="brand-mark" aria-hidden="true"></span>
+          Signal Note
+        </a>
+        <div class="connection"><span aria-hidden="true"></span> device polls every 30s</div>
+      </header>
+
+      <section class="hero" aria-labelledby="page-title">
+        <div class="intro">
+          <p class="eyebrow">CELLULAR E-PAPER / 122 × 250 PX</p>
+          <h1 id="page-title">Leave a note<br>in the air.</h1>
+          <p class="lede">
+            Set the message waiting for the phone. The preview uses the same one-bit pixels,
+            character set, wrapping, and alignment as the physical display.
+          </p>
+
+          <form id="message-form">
+            <label for="message">Message</label>
+            <textarea
+              id="message"
+              name="message"
+              maxlength="300"
+              rows="5"
+              spellcheck="true"
+              required
+            ></textarea>
+            <div class="form-meta">
+              <span id="character-count">0 / 300</span>
+              <span>printable ASCII only</span>
+            </div>
+            <button type="submit">
+              <span>Set display message</span>
+              <span aria-hidden="true">↗</span>
+            </button>
+            <p id="status" class="status" role="status" aria-live="polite"></p>
+          </form>
+        </div>
+
+        <div class="device-stage">
+          <div class="device">
+            <div class="device-label">
+              <span>PHONE / DISPLAY 01</span>
+              <span id="revision">REV —</span>
+            </div>
+            <div class="screen-bezel">
+              <canvas
+                id="display"
+                width="122"
+                height="250"
+                aria-label="Exact pixel preview of the e-paper message"
+              ></canvas>
+            </div>
+            <div class="device-footer">
+              <span>SIM7670G</span>
+              <span class="signal-bars" aria-label="Cellular signal">
+                <i></i><i></i><i></i><i></i>
+              </span>
+              <span>E-PAPER V4</span>
+            </div>
+          </div>
+          <p class="preview-note"><span>LIVE PREVIEW</span> 1 canvas pixel = 1 panel pixel</p>
+        </div>
+      </section>
+    </main>
+  </body>
+</html>

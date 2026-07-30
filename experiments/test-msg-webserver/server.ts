@@ -1,0 +1,194 @@
+const ROOT = new URL(".", import.meta.url);
+const PUBLIC_DIR = new URL("./public/", ROOT);
+const DATA_DIR = new URL("./data/", ROOT);
+const MESSAGE_FILE = new URL("./message.json", DATA_DIR);
+const PORT = readPort();
+
+const DISPLAY = {
+  width: 122,
+  height: 250,
+  font: "phone-5x7-v1",
+  glyphWidth: 5,
+  glyphHeight: 7,
+  characterAdvance: 6,
+  lineAdvance: 13,
+  horizontalAlign: "center",
+  verticalAlign: "center",
+} as const;
+
+const DEFAULT_MESSAGE = "cellular link ready.";
+const MAX_MESSAGE_LENGTH = 300;
+const ALLOWED_MESSAGE = /^[\x20-\x7e\n]*$/;
+
+type MessageState = {
+  message: string;
+  revision: number;
+  updatedAt: string;
+};
+
+let state = await loadState();
+
+Deno.serve({ port: PORT }, async (request) => {
+  try {
+    return await route(request);
+  } catch (error) {
+    console.error(error);
+    return json({ error: "internal server error" }, 500);
+  }
+});
+
+async function route(request: Request): Promise<Response> {
+  const url = new URL(request.url);
+
+  if (url.pathname === "/healthz" && request.method === "GET") {
+    return json({ ok: true });
+  }
+
+  if (url.pathname === "/api/message") {
+    if (request.method === "GET") {
+      return messageResponse(request);
+    }
+
+    if (request.method === "PUT" || request.method === "POST") {
+      return await updateMessage(request);
+    }
+
+    return methodNotAllowed("GET, PUT, POST");
+  }
+
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    return methodNotAllowed("GET, HEAD");
+  }
+
+  const fileName = url.pathname === "/" ? "index.html" : url.pathname.slice(1);
+  if (!["index.html", "app.js", "styles.css"].includes(fileName)) {
+    return new Response("Not found", { status: 404 });
+  }
+
+  const file = await Deno.readFile(new URL(fileName, PUBLIC_DIR));
+  const headers = new Headers({
+    "content-type": contentType(fileName),
+    "cache-control": fileName === "index.html" ? "no-cache" : "public, max-age=3600",
+    "x-content-type-options": "nosniff",
+  });
+  return new Response(request.method === "HEAD" ? null : file, { headers });
+}
+
+function messageResponse(request: Request): Response {
+  const etag = `"message-${state.revision}"`;
+  if (request.headers.get("if-none-match") === etag) {
+    return new Response(null, { status: 304, headers: { etag, "cache-control": "no-cache" } });
+  }
+
+  return json(
+    { ...state, pollAfterSeconds: 30, display: DISPLAY },
+    200,
+    { etag, "cache-control": "no-cache" },
+  );
+}
+
+async function updateMessage(request: Request): Promise<Response> {
+  if (!request.headers.get("content-type")?.toLowerCase().includes("application/json")) {
+    return json({ error: "content-type must be application/json" }, 415);
+  }
+
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ error: "request body must be valid JSON" }, 400);
+  }
+
+  if (!isRecord(body) || typeof body.message !== "string") {
+    return json({ error: 'request body must be {"message":"..."}' }, 400);
+  }
+
+  const message = body.message.replaceAll("\r\n", "\n").replaceAll("\r", "\n").trim();
+  const validationError = validateMessage(message);
+  if (validationError) return json({ error: validationError }, 422);
+
+  if (message === state.message) return messageResponse(request);
+
+  state = {
+    message,
+    revision: state.revision + 1,
+    updatedAt: new Date().toISOString(),
+  };
+  await saveState(state);
+  return json({ ...state, pollAfterSeconds: 30, display: DISPLAY });
+}
+
+function validateMessage(message: string): string | undefined {
+  if (!message) return "message cannot be empty";
+  if (message.length > MAX_MESSAGE_LENGTH) {
+    return `message cannot exceed ${MAX_MESSAGE_LENGTH} characters`;
+  }
+  if (!ALLOWED_MESSAGE.test(message)) {
+    return "message may only contain printable ASCII characters and new lines";
+  }
+}
+
+async function loadState(): Promise<MessageState> {
+  try {
+    const parsed: unknown = JSON.parse(await Deno.readTextFile(MESSAGE_FILE));
+    if (
+      isRecord(parsed) &&
+      typeof parsed.message === "string" &&
+      typeof parsed.revision === "number" &&
+      typeof parsed.updatedAt === "string" &&
+      !validateMessage(parsed.message)
+    ) {
+      return parsed as MessageState;
+    }
+  } catch (error) {
+    if (!(error instanceof Deno.errors.NotFound)) {
+      console.error("Could not load message state:", error);
+    }
+  }
+
+  return {
+    message: DEFAULT_MESSAGE,
+    revision: 1,
+    updatedAt: new Date(0).toISOString(),
+  };
+}
+
+async function saveState(nextState: MessageState): Promise<void> {
+  await Deno.mkdir(DATA_DIR, { recursive: true });
+  const temporaryFile = new URL("./message.json.tmp", DATA_DIR);
+  await Deno.writeTextFile(temporaryFile, `${JSON.stringify(nextState, null, 2)}\n`);
+  await Deno.rename(temporaryFile, MESSAGE_FILE);
+}
+
+function json(body: unknown, status = 200, extraHeaders: HeadersInit = {}): Response {
+  return Response.json(body, {
+    status,
+    headers: {
+      "cache-control": "no-store",
+      ...Object.fromEntries(new Headers(extraHeaders)),
+    },
+  });
+}
+
+function methodNotAllowed(allow: string): Response {
+  return new Response("Method not allowed", { status: 405, headers: { allow } });
+}
+
+function contentType(fileName: string): string {
+  if (fileName.endsWith(".html")) return "text/html; charset=utf-8";
+  if (fileName.endsWith(".css")) return "text/css; charset=utf-8";
+  return "text/javascript; charset=utf-8";
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function readPort(): number {
+  const value = Deno.env.get("PORT") ?? "8000";
+  const port = Number(value);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new Error(`Invalid PORT: ${value}`);
+  }
+  return port;
+}
