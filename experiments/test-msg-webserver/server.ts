@@ -2,6 +2,7 @@ const ROOT = new URL(".", import.meta.url);
 const PUBLIC_DIR = new URL("./public/", ROOT);
 const DATA_DIR = new URL("./data/", ROOT);
 const MESSAGE_FILE = new URL("./message.json", DATA_DIR);
+const DEVICE_STATUS_FILE = new URL("./device-status.json", DATA_DIR);
 const PORT = readPort();
 
 const DISPLAY = {
@@ -26,7 +27,24 @@ type MessageState = {
   updatedAt: string;
 };
 
+type DeviceStatus = {
+  deviceId: string;
+  firmwareVersion: string;
+  uptimeSeconds: number;
+  signalRssiDbm: number | null;
+  signalPercent: number | null;
+  operator: string;
+  networkType: string;
+  ipAddress: string;
+  lastMessageRevision: number;
+  displayUpdated: boolean;
+  lastPollOk: boolean;
+  lastError: string;
+  reportedAt: string;
+};
+
 let state = await loadState();
+let deviceStatus = await loadDeviceStatus();
 
 Deno.serve({ port: PORT }, async (request) => {
   try {
@@ -56,6 +74,18 @@ async function route(request: Request): Promise<Response> {
     return methodNotAllowed("GET, PUT, POST");
   }
 
+  if (url.pathname === "/api/device/status") {
+    if (request.method === "GET") {
+      return deviceStatusResponse();
+    }
+
+    if (request.method === "POST") {
+      return await updateDeviceStatus(request);
+    }
+
+    return methodNotAllowed("GET, POST");
+  }
+
   if (request.method !== "GET" && request.method !== "HEAD") {
     return methodNotAllowed("GET, HEAD");
   }
@@ -72,6 +102,86 @@ async function route(request: Request): Promise<Response> {
     "x-content-type-options": "nosniff",
   });
   return new Response(request.method === "HEAD" ? null : file, { headers });
+}
+
+function deviceStatusResponse(): Response {
+  if (!deviceStatus) {
+    return json({ status: null, online: false, staleAfterSeconds: 75 });
+  }
+
+  const ageSeconds = Math.max(0, (Date.now() - Date.parse(deviceStatus.reportedAt)) / 1000);
+  return json({
+    status: deviceStatus,
+    online: ageSeconds <= 75,
+    ageSeconds: Math.round(ageSeconds),
+    staleAfterSeconds: 75,
+  });
+}
+
+async function updateDeviceStatus(request: Request): Promise<Response> {
+  if (!request.headers.get("content-type")?.toLowerCase().includes("application/json")) {
+    return json({ error: "content-type must be application/json" }, 415);
+  }
+
+  let body: unknown;
+  try {
+    body = await request.json();
+  } catch {
+    return json({ error: "request body must be valid JSON" }, 400);
+  }
+
+  const validationError = validateDeviceStatus(body);
+  if (validationError) return json({ error: validationError }, 422);
+
+  const report = body as Omit<DeviceStatus, "reportedAt">;
+  deviceStatus = {
+    ...report,
+    deviceId: cleanText(report.deviceId, 32),
+    firmwareVersion: cleanText(report.firmwareVersion, 32),
+    operator: cleanText(report.operator, 64),
+    networkType: cleanText(report.networkType, 32),
+    ipAddress: cleanText(report.ipAddress, 64),
+    lastError: cleanText(report.lastError, 160),
+    reportedAt: new Date().toISOString(),
+  };
+  await saveJson(DEVICE_STATUS_FILE, deviceStatus);
+  return deviceStatusResponse();
+}
+
+function validateDeviceStatus(value: unknown): string | undefined {
+  if (!isRecord(value)) return "request body must be an object";
+
+  const strings = [
+    "deviceId",
+    "firmwareVersion",
+    "operator",
+    "networkType",
+    "ipAddress",
+    "lastError",
+  ];
+  if (strings.some((key) => typeof value[key] !== "string")) {
+    return `fields ${strings.join(", ")} must be strings`;
+  }
+
+  const integers = ["uptimeSeconds", "lastMessageRevision"];
+  if (integers.some((key) => !Number.isInteger(value[key]) || (value[key] as number) < 0)) {
+    return `fields ${integers.join(", ")} must be non-negative integers`;
+  }
+
+  if (typeof value.displayUpdated !== "boolean" || typeof value.lastPollOk !== "boolean") {
+    return "fields displayUpdated and lastPollOk must be booleans";
+  }
+
+  if (!isNullableNumber(value.signalRssiDbm) || !isNullableNumber(value.signalPercent)) {
+    return "signal fields must be numbers or null";
+  }
+
+  if (
+    typeof value.signalPercent === "number" &&
+    (value.signalPercent < 0 || value.signalPercent > 100)
+  ) {
+    return "signalPercent must be between 0 and 100";
+  }
 }
 
 function messageResponse(request: Request): Response {
@@ -154,10 +264,32 @@ async function loadState(): Promise<MessageState> {
 }
 
 async function saveState(nextState: MessageState): Promise<void> {
+  await saveJson(MESSAGE_FILE, nextState);
+}
+
+async function loadDeviceStatus(): Promise<DeviceStatus | null> {
+  try {
+    const parsed: unknown = JSON.parse(await Deno.readTextFile(DEVICE_STATUS_FILE));
+    if (
+      isRecord(parsed) &&
+      typeof parsed.reportedAt === "string" &&
+      !validateDeviceStatus(parsed)
+    ) {
+      return parsed as DeviceStatus;
+    }
+  } catch (error) {
+    if (!(error instanceof Deno.errors.NotFound)) {
+      console.error("Could not load device status:", error);
+    }
+  }
+  return null;
+}
+
+async function saveJson(file: URL, value: unknown): Promise<void> {
   await Deno.mkdir(DATA_DIR, { recursive: true });
-  const temporaryFile = new URL("./message.json.tmp", DATA_DIR);
-  await Deno.writeTextFile(temporaryFile, `${JSON.stringify(nextState, null, 2)}\n`);
-  await Deno.rename(temporaryFile, MESSAGE_FILE);
+  const temporaryFile = new URL(`./${file.pathname.split("/").at(-1)}.tmp`, DATA_DIR);
+  await Deno.writeTextFile(temporaryFile, `${JSON.stringify(value, null, 2)}\n`);
+  await Deno.rename(temporaryFile, file);
 }
 
 function json(body: unknown, status = 200, extraHeaders: HeadersInit = {}): Response {
@@ -182,6 +314,20 @@ function contentType(fileName: string): string {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
+}
+
+function isNullableNumber(value: unknown): value is number | null {
+  return value === null || (typeof value === "number" && Number.isFinite(value));
+}
+
+function cleanText(value: string, maxLength: number): string {
+  return [...value]
+    .filter((character) => {
+      const code = character.charCodeAt(0);
+      return code >= 32 && code !== 127;
+    })
+    .join("")
+    .slice(0, maxLength);
 }
 
 function readPort(): number {

@@ -1,3 +1,5 @@
 .git
 data/message.json
 data/message.json.tmp
+data/device-status.json
+data/device-status.json.tmp

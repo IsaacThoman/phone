@@ -114,6 +114,17 @@ const status = document.querySelector("#status");
 const counter = document.querySelector("#character-count");
 const revision = document.querySelector("#revision");
 const submitButton = form.querySelector("button");
+const presence = document.querySelector("#device-presence");
+const signal = document.querySelector("#device-signal");
+const signalBars = document.querySelector("#device-signal-bars");
+const operator = document.querySelector("#device-operator");
+const network = document.querySelector("#device-network");
+const ipAddress = document.querySelector("#device-ip");
+const uptime = document.querySelector("#device-uptime");
+const firmware = document.querySelector("#device-firmware");
+const displayStatus = document.querySelector("#device-display");
+const lastSeen = document.querySelector("#device-last-seen");
+const deviceError = document.querySelector("#device-error");
 
 context.imageSmoothingEnabled = false;
 
@@ -185,6 +196,56 @@ async function loadMessage() {
   }
 }
 
+async function loadDeviceStatus() {
+  try {
+    const response = await fetch("/api/device/status", { cache: "no-store" });
+    if (!response.ok) throw new Error(`server returned ${response.status}`);
+    renderDeviceStatus(await response.json());
+  } catch {
+    presence.textContent = "Unknown";
+    presence.className = "presence offline";
+  }
+}
+
+function renderDeviceStatus(data) {
+  const device = data.status;
+  presence.textContent = data.online ? "Online" : device ? "Stale" : "Waiting";
+  presence.className = `presence ${data.online ? "online" : "offline"}`;
+
+  if (!device) return;
+
+  const signalLevel = device.signalPercent === null
+    ? 0
+    : Math.max(1, Math.min(4, Math.ceil(device.signalPercent / 25)));
+  signalBars.dataset.level = String(signalLevel);
+  signal.textContent = device.signalRssiDbm === null
+    ? "Unknown"
+    : `${device.signalRssiDbm} dBm · ${device.signalPercent}%`;
+  operator.textContent = device.operator || "Unknown";
+  network.textContent = device.networkType || "Unknown";
+  ipAddress.textContent = device.ipAddress || "Unavailable";
+  uptime.textContent = formatDuration(device.uptimeSeconds);
+  firmware.textContent = device.firmwareVersion;
+  displayStatus.textContent = `REV ${device.lastMessageRevision}${
+    device.displayUpdated ? " · updated" : ""
+  }`;
+  lastSeen.textContent = data.ageSeconds < 5
+    ? "Just now"
+    : `${formatDuration(data.ageSeconds)} ago`;
+  deviceError.hidden = !device.lastError;
+  deviceError.textContent = device.lastError ? `LAST ERROR / ${device.lastError}` : "";
+}
+
+function formatDuration(seconds) {
+  const days = Math.floor(seconds / 86400);
+  const hours = Math.floor((seconds % 86400) / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  if (days) return `${days}d ${hours}h`;
+  if (hours) return `${hours}h ${minutes}m`;
+  if (minutes) return `${minutes}m ${seconds % 60}s`;
+  return `${seconds}s`;
+}
+
 function updatePreview() {
   counter.textContent = `${input.value.length} / ${MAX_MESSAGE_LENGTH}`;
   drawMessage(input.value);
@@ -219,3 +280,5 @@ form.addEventListener("submit", async (event) => {
 
 drawMessage("");
 await loadMessage();
+await loadDeviceStatus();
+setInterval(loadDeviceStatus, 10_000);

@@ -53,6 +53,32 @@ same rendering rules.
 
 `GET /healthz` returns `{"ok":true}` for deployment health checks.
 
+## Device telemetry
+
+The phone reports its non-sensitive connection state after each message poll:
+
+```sh
+curl -X POST http://localhost:8000/api/device/status \
+  -H 'content-type: application/json' \
+  -d '{
+    "deviceId":"phone-01",
+    "firmwareVersion":"1.0.0",
+    "uptimeSeconds":120,
+    "signalRssiDbm":-81,
+    "signalPercent":63,
+    "operator":"Example Wireless",
+    "networkType":"LTE",
+    "ipAddress":"10.0.0.2",
+    "lastMessageRevision":2,
+    "displayUpdated":true,
+    "lastPollOk":true,
+    "lastError":""
+  }'
+```
+
+`GET /api/device/status` returns the latest report with server-calculated presence and age. The
+server deliberately does not collect IMEI, ICCID, IMSI, phone number, or location.
+
 ## Deploy behind HTTPS
 
 Build from this directory with the included `Dockerfile`. Route HTTPS traffic from the reverse proxy

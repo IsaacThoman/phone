@@ -76,6 +76,55 @@
             </div>
           </div>
           <p class="preview-note"><span>LIVE PREVIEW</span> 1 canvas pixel = 1 panel pixel</p>
+          <section class="telemetry" aria-labelledby="telemetry-title">
+            <div class="telemetry-heading">
+              <div>
+                <p class="telemetry-kicker">DEVICE LINK</p>
+                <h2 id="telemetry-title">Phone status</h2>
+              </div>
+              <span id="device-presence" class="presence offline">Waiting</span>
+            </div>
+            <dl>
+              <div class="signal-row">
+                <dt>Signal</dt>
+                <dd>
+                  <span id="device-signal-bars" class="mini-bars" aria-hidden="true">
+                    <i></i><i></i><i></i><i></i>
+                  </span>
+                  <span id="device-signal">—</span>
+                </dd>
+              </div>
+              <div>
+                <dt>Carrier</dt>
+                <dd id="device-operator">—</dd>
+              </div>
+              <div>
+                <dt>Network</dt>
+                <dd id="device-network">—</dd>
+              </div>
+              <div>
+                <dt>IP</dt>
+                <dd id="device-ip">—</dd>
+              </div>
+              <div>
+                <dt>Uptime</dt>
+                <dd id="device-uptime">—</dd>
+              </div>
+              <div>
+                <dt>Firmware</dt>
+                <dd id="device-firmware">—</dd>
+              </div>
+              <div>
+                <dt>Display</dt>
+                <dd id="device-display">—</dd>
+              </div>
+              <div>
+                <dt>Last report</dt>
+                <dd id="device-last-seen">Never</dd>
+              </div>
+            </dl>
+            <p id="device-error" class="device-error" hidden></p>
+          </section>
         </div>
       </section>
     </main>
